@@ -96,6 +96,14 @@ function Shader(mustacheTemplate) {
             orbital_inclination: -10
         },
 
+        // --- Pearl Star parameters (your theory) ---
+        // r_Pearl = (1 + sqrt(2)) * GM/c^2 = ((1 + sqrt(2)) / 2) * r_s
+        // In these normalized units r_s = 1, so r_Pearl ≈ 1.207.
+        pearl_star: {
+            enabled: true,
+            radius_factor: (1.0 + Math.sqrt(2.0)) / 2.0
+        },
+
         planetEnabled: function() {
             return this.planet.enabled && this.quality !== 'fast';
         },
@@ -180,6 +188,9 @@ function init(textures) {
         planet_distance: { type: "f" },
         planet_radius: { type: "f" },
 
+        // Pearl Star radius in units of Schwarzschild radius r_s (1.0 in sim)
+        pearl_radius: { type: "f", value: 1.0 },
+
         star_texture: { type: "t", value: textures.stars },
         accretion_disk_texture: { type: "t",  value: textures.accretion_disk },
         galaxy_texture: { type: "t", value: textures.galaxy },
@@ -190,6 +201,12 @@ function init(textures) {
     updateUniforms = function() {
         uniforms.planet_distance.value = shader.parameters.planet.distance;
         uniforms.planet_radius.value = shader.parameters.planet.radius;
+
+        // Update Pearl Star radius uniform
+        uniforms.pearl_radius.value =
+            shader.parameters.pearl_star.enabled
+                ? shader.parameters.pearl_star.radius_factor
+                : 1.0; // fall back to standard horizon if disabled
 
         uniforms.resolution.value.x = renderer.domElement.width;
         uniforms.resolution.value.y = renderer.domElement.height;
@@ -310,6 +327,19 @@ function setupGUI() {
     $(folder.domElement).addClass('planet-controls');
     //folder.open();
 
+    // --- Pearl Star GUI controls ---
+    folder = gui.addFolder('Pearl Star');
+    folder.add(p.pearl_star, 'enabled')
+        .name('Enable Pearl Star')
+        .onChange(function () {
+            updateShader();
+            updateUniforms();
+        });
+    folder.add(p.pearl_star, 'radius_factor', 1.0, 1.5, 0.001)
+        .name('Radius / r_s')
+        .onChange(updateUniforms);
+    //folder.open();
+
     function setGuiRowClass(guiEl, klass) {
         $(guiEl.domElement).parent().parent().addClass(klass);
     }
@@ -363,7 +393,7 @@ function updateCamera( event ) {
     if (shader.parameters.observer.motion) {
         camera_matrix = new THREE.Matrix3();
     }
-    else {
+    else {
         camera_matrix = observer.orientation;
     }
 
