@@ -458,8 +458,7 @@ void main() {
                      * GALAXY_BRIGHTNESS;
 
         // --- stylised "reflection" of accretion disk on Pearl surface ---
-        // Use the Pearl surface normal to paint a bright band around the equator
-        // using the accretion disk texture.
+        {{#accretion_disk}}
         float z = n.z;  // +1 at north pole, 0 at equator, -1 at south pole
 
         // Map |z| -> radial coordinate in the disk texture (0 at poles, 1 at equator)
@@ -480,6 +479,7 @@ void main() {
         float DISK_REFLECT_INTENSITY = ACCRETION_BRIGHTNESS * 2.5;
 
         pearl_col += disk_tex * disk_bb * DISK_REFLECT_INTENSITY * band;
+        {{/accretion_disk}}
 
         // make Pearl Star surface a bit brighter overall
         float PEARL_BRIGHTNESS = 1.2;
