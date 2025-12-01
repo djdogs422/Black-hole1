@@ -272,7 +272,7 @@ void main() {
     float u = 1.0 / length(pos), old_u;
     float u0 = u;
 
-    // Pearl Star boundary: u_Pearl = 1 / r_Pearl
+    // Pearl Star boundary: u_Pearl = 1 / r_Pearl  (r_Pearl > 1 => u_Pearl < 1)
     float u_pearl = 1.0 / pearl_radius;
 
     vec3 normal_vec = normalize(pos);
@@ -291,6 +291,7 @@ void main() {
     {{/light_travel_time}}
 
     vec3 old_pos;
+    bool bounced = false;  // track single Pearl Star bounce
 
     for (int j=0; j < NSTEPS; j++) {
 
@@ -309,10 +310,17 @@ void main() {
         {{/gravitational_time_dilation}}
         {{/light_travel_time}}
 
-        // Leapfrog scheme
+        // Leapfrog scheme in Schwarzschild: d^2u/dphi^2 = -u + 1.5 u^2
         u += du*step;
         float ddu = -u*(1.0 - 1.5*u*u);
         du += ddu*step;
+
+        // Pearl Star bounce: when ray reaches u > u_pearl, reflect radial motion
+        if (!bounced && u > u_pearl) {
+            u = u_pearl;   // clamp to boundary
+            du = -du;      // reverse radial motion (single elastic bounce)
+            bounced = true;
+        }
 
         if (u < 0.0) break;
 
@@ -401,17 +409,13 @@ void main() {
         t -= dt;
         {{/light_travel_time}}
 
-        if (solid_isec_t <= 1.0) u = 2.0; // break on solid intersection
-
-        // Stop integrating once we reach inside the Pearl Star radius
-        if (u > u_pearl) break;
+        // if we hit a solid (planet/disk) along this geodesic, stop integrating
+        if (solid_isec_t <= 1.0) u = 2.0; // sentinel value: "hit solid, no background"
+        if (u > 1.0) break;
     }
 
-    // Pearl Star boundary is at u = u_pearl (r = pearl_radius)
-    // u < u_pearl: ray escaped to infinity -> background sky
-    // u >= u_pearl: ray hit Pearl Star -> reflect environment (galaxy + stars + stylised disk)
-    if (u < u_pearl) {
-        // escaped ray: sample background along outgoing direction
+    // If u < 1.0, ray was not absorbed by a solid: sample background
+    if (u < 1.0) {
         ray = normalize(pos - old_pos);
         vec2 tex_coord = sphere_map(ray * BG_COORDS);
         float t_coord;
@@ -426,66 +430,6 @@ void main() {
         }
 
         color += galaxy_color(tex_coord, ray_doppler_factor) * GALAXY_BRIGHTNESS;
-    } else {
-        // hit Pearl Star reflective surface
-        // clamp to Pearl radius and get outward normal
-        vec3 surface_pos = normalize(pos) / u_pearl;
-        vec3 n = normalize(surface_pos);
-
-        // incoming direction is direction of ray towards Pearl Star
-        vec3 inc_dir = normalize(pos - old_pos);
-        vec3 refl_dir = reflect(inc_dir, n);
-
-        vec3 pearl_col = vec3(0.0);
-
-        // --- reflected environment (stars + galaxy) ---
-        vec2 env_coord = sphere_map(refl_dir * BG_COORDS);
-        float t_coord;
-
-        // stars
-        vec4 star_color = texture2D(star_texture, env_coord);
-        if (star_color.r > 0.0) {
-            t_coord = (STAR_MIN_TEMPERATURE +
-                (STAR_MAX_TEMPERATURE-STAR_MIN_TEMPERATURE) * star_color.g)
-                 / ray_doppler_factor;
-
-            pearl_col += BLACK_BODY_COLOR(t_coord).rgb
-                         * star_color.r * STAR_BRIGHTNESS;
-        }
-
-        // galaxy
-        pearl_col += galaxy_color(env_coord, ray_doppler_factor).rgb
-                     * GALAXY_BRIGHTNESS;
-
-        // --- stylised "reflection" of accretion disk on Pearl surface ---
-        {{#accretion_disk}}
-        float z = n.z;  // +1 at north pole, 0 at equator, -1 at south pole
-
-        // Map |z| -> radial coordinate in the disk texture (0 at poles, 1 at equator)
-        float disk_radial = 1.0 - clamp(abs(z), 0.0, 1.0);
-
-        // Angular coordinate around the equator
-        float disk_angle = atan(n.x, n.y) / M_PI * 0.5 + 0.5;
-
-        vec2 disk_uv = vec2(disk_radial, disk_angle);
-
-        vec3 disk_tex = texture2D(accretion_disk_texture, disk_uv).rgb;
-        vec3 disk_bb  = BLACK_BODY_COLOR(ACCRETION_TEMPERATURE).rgb;
-
-        // Emphasise the band near the equator
-        float band = smoothstep(0.6, 1.0, disk_radial);
-
-        // Make disk component bright so it's clearly visible
-        float DISK_REFLECT_INTENSITY = ACCRETION_BRIGHTNESS * 2.5;
-
-        pearl_col += disk_tex * disk_bb * DISK_REFLECT_INTENSITY * band;
-        {{/accretion_disk}}
-
-        // make Pearl Star surface a bit brighter overall
-        float PEARL_BRIGHTNESS = 1.2;
-        pearl_col *= PEARL_BRIGHTNESS;
-
-        color += vec4(pearl_col, 1.0);
     }
 
     gl_FragColor = color*ray_intensity;
