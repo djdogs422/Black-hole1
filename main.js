@@ -1,467 +1,441 @@
-"use strict"
-/*global THREE, SHADER_LOADER, Mustache, Stats, Detector, $, dat:false */
-/*global document, window, setTimeout, requestAnimationFrame:false */
-/*global ProceduralTextures:false */
+#define M_PI 3.141592653589793238462643383279
+#define R_SQRT_2 0.7071067811865475
+#define DEG_TO_RAD (M_PI/180.0)
+#define SQ(x) ((x)*(x))
 
-if ( ! Detector.webgl ) Detector.addGetWebGLMessage();
+#define ROT_Y(a) mat3(0, cos(a), sin(a), 1, 0, 0, 0, sin(a), -cos(a))
 
-function Observer() {
-    this.position = new THREE.Vector3(10,0,0);
-    this.velocity = new THREE.Vector3(0,1,0);
-    this.orientation = new THREE.Matrix3();
-    this.time = 0.0;
+
+// spectrum texture lookup helper macros
+const float BLACK_BODY_TEXTURE_COORD = 1.0;
+const float SINGLE_WAVELENGTH_TEXTURE_COORD = 0.5;
+const float TEMPERATURE_LOOKUP_RATIO_TEXTURE_COORD = 0.0;
+
+// black-body texture metadata
+const float SPECTRUM_TEX_TEMPERATURE_RANGE = 65504.0;
+const float SPECTRUM_TEX_WAVELENGTH_RANGE = 2048.0;
+const float SPECTRUM_TEX_RATIO_RANGE = 6.48053329012;
+
+// multi-line macros don't seem to work in WebGL :(
+#define BLACK_BODY_COLOR(t) texture2D(spectrum_texture, vec2((t) / SPECTRUM_TEX_TEMPERATURE_RANGE, BLACK_BODY_TEXTURE_COORD))
+#define SINGLE_WAVELENGTH_COLOR(lambda) texture2D(spectrum_texture, vec2((lambda) / SPECTRUM_TEX_WAVELENGTH_RANGE, SINGLE_WAVELENGTH_TEXTURE_COORD))
+#define TEMPERATURE_LOOKUP(ratio) (texture2D(spectrum_texture, vec2((ratio) / SPECTRUM_TEX_RATIO_RANGE, TEMPERATURE_LOOKUP_RATIO_TEXTURE_COORD)).r * SPECTRUM_TEX_TEMPERATURE_RANGE)
+
+uniform vec2 resolution;
+uniform float time;
+
+uniform vec3 cam_pos;
+uniform vec3 cam_x;
+uniform vec3 cam_y;
+uniform vec3 cam_z;
+uniform vec3 cam_vel;
+
+uniform float planet_distance, planet_radius;
+
+// Pearl Star radius (in units of Schwarzschild radius r_s = 1.0)
+uniform float pearl_radius;
+
+uniform sampler2D galaxy_texture, star_texture,
+    accretion_disk_texture, planet_texture, spectrum_texture;
+
+// stepping parameters
+const int NSTEPS = {{n_steps}};
+const float MAX_REVOLUTIONS = 2.0;
+
+const float ACCRETION_MIN_R = 1.5;
+const float ACCRETION_WIDTH = 5.0;
+const float ACCRETION_BRIGHTNESS = 0.9;
+const float ACCRETION_TEMPERATURE = 3900.0;
+
+const float STAR_MIN_TEMPERATURE = 4000.0;
+const float STAR_MAX_TEMPERATURE = 15000.0;
+
+const float STAR_BRIGHTNESS = 1.0;
+const float GALAXY_BRIGHTNESS = 0.4;
+
+const float PLANET_AMBIENT = 0.1;
+const float PLANET_LIGHTNESS = 1.5;
+
+// background texture coordinate system
+mat3 BG_COORDS = ROT_Y(45.0 * DEG_TO_RAD);
+
+// planet texture coordinate system
+const float PLANET_AXIAL_TILT = 30.0 * DEG_TO_RAD;
+mat3 PLANET_COORDS = ROT_Y(PLANET_AXIAL_TILT);
+
+const float FOV_ANGLE_DEG = 90.0;
+float FOV_MULT = 1.0 / tan(DEG_TO_RAD * FOV_ANGLE_DEG*0.5);
+
+// derived "constants" (from uniforms)
+float PLANET_RADIUS,
+    PLANET_DISTANCE,
+    PLANET_ORBITAL_ANG_VEL,
+    PLANET_ROTATION_ANG_VEL,
+    PLANET_GAMMA;
+
+vec2 sphere_map(vec3 p) {
+    return vec2(atan(p.x,p.y)/M_PI*0.5+0.5, asin(p.z)/M_PI+0.5);
 }
 
-Observer.prototype.orbitalFrame = function() {
+float smooth_step(float x, float threshold) {
+    const float STEEPNESS = 1.0;
+    return 1.0 / (1.0 + exp(-(x-threshold)*STEEPNESS));
+}
 
-    //var orbital_y = observer.velocity.clone().normalize();
-    var orbital_y = (new THREE.Vector3())
-        .subVectors(observer.velocity.clone().normalize().multiplyScalar(4.0),
-            observer.position).normalize();
+vec3 lorentz_velocity_transformation(vec3 moving_v, vec3 frame_v) {
+    float v = length(frame_v);
+    if (v > 0.0) {
+        vec3 v_axis = -frame_v / v;
+        float gamma = 1.0/sqrt(1.0 - v*v);
 
-    var orbital_z = (new THREE.Vector3())
-        .crossVectors(observer.position, orbital_y).normalize();
-    var orbital_x = (new THREE.Vector3()).crossVectors(orbital_y, orbital_z);
+        float moving_par = dot(moving_v, v_axis);
+        vec3 moving_perp = moving_v - v_axis*moving_par;
 
-
-    return (new THREE.Matrix4()).makeBasis(
-        orbital_x,
-        orbital_y,
-        orbital_z
-    ).linearPart();
-};
-
-Observer.prototype.move = function(dt) {
-
-    dt *= shader.parameters.time_scale;
-
-    var r;
-    var v = 0;
-
-    // motion on a pre-defined cirular orbit
-    if (shader.parameters.observer.motion) {
-
-        r = shader.parameters.observer.distance;
-        v =  1.0 / Math.sqrt(2.0*(r-1.0));
-        var ang_vel = v / r;
-        var angle = this.time * ang_vel;
-
-        var s = Math.sin(angle), c = Math.cos(angle);
-
-        this.position.set(c*r, s*r, 0);
-        this.velocity.set(-s*v, c*v, 0);
-
-        var alpha = degToRad(shader.parameters.observer.orbital_inclination);
-        var orbit_coords = (new THREE.Matrix4()).makeRotationY(alpha);
-
-        this.position.applyMatrix4(orbit_coords);
-        this.velocity.applyMatrix4(orbit_coords);
+        float denom = 1.0 + v*moving_par;
+        return (v_axis*(moving_par+v)+moving_perp/gamma)/denom;
     }
-    else {
-        r = this.position.length();
-    }
+    return moving_v;
+}
 
-    if (shader.parameters.gravitational_time_dilation) {
-        dt = Math.sqrt((dt*dt * (1.0 - v*v)) / (1-1.0/r));
-    }
+vec3 contract(vec3 x, vec3 d, float mult) {
+    float par = dot(x,d);
+    return (x-par*d) + d*par*mult;
+}
 
-    this.time += dt;
-};
+vec4 planet_intersection(vec3 old_pos, vec3 ray, float t, float dt,
+        vec3 planet_pos0, float ray_doppler_factor) {
 
-var container, stats;
-var camera, scene, renderer, cameraControls, shader = null;
-var observer = new Observer();
+    vec4 ret = vec4(0,0,0,0);
+    vec3 ray0 = ray;
+    ray = ray/dt;
 
-function Shader(mustacheTemplate) {
-    // Compile-time shader parameters
-    this.parameters = {
-        n_steps: 100,
-        quality: 'medium',
-        accretion_disk: true,
-        planet: {
-            enabled: true,
-            distance: 7.0,
-            radius: 0.4
-        },
-        lorentz_contraction: true,
-        gravitational_time_dilation: true,
-        aberration: true,
-        beaming: true,
-        doppler_shift: true,
-        light_travel_time: true,
-        time_scale: 1.0,
-        observer: {
-            motion: true,
-            distance: 11.0,
-            orbital_inclination: -10
-        },
+    vec3 planet_dir = vec3(planet_pos0.y, -planet_pos0.x, 0.0) / PLANET_DISTANCE;
 
-        // --- Pearl Star parameters (your theory) ---
-        // r_Pearl = (1 + sqrt(2)) * GM/c^2 = ((1 + sqrt(2)) / 2) * r_s
-        // In these normalized units r_s = 1, so r_Pearl ≈ 1.207.
-        pearl_star: {
-            enabled: true,
-            radius_factor: (1.0 + Math.sqrt(2.0)) / 2.0
-        },
+    {{#light_travel_time}}
+    float planet_ang1 = (t-dt) * PLANET_ORBITAL_ANG_VEL;
+    vec3 planet_pos1 = vec3(cos(planet_ang1), sin(planet_ang1), 0)*PLANET_DISTANCE;
+    vec3 planet_vel = (planet_pos1-planet_pos0)/dt;
 
-        planetEnabled: function() {
-            return this.planet.enabled && this.quality !== 'fast';
-        },
+    // transform to moving planet coordinate system
+    ray = ray - planet_vel;
+    {{/light_travel_time}}
+    {{^light_travel_time}}
+    vec3 planet_vel = planet_dir * PLANET_ORBITAL_ANG_VEL * PLANET_DISTANCE;
+    {{/light_travel_time}}
 
-        observerMotion: function() {
-            return this.observer.motion;
+    // ray-sphere intersection
+    vec3 d = old_pos - planet_pos0;
+
+    {{#lorentz_contraction}}
+    ray = contract(ray, planet_dir, PLANET_GAMMA);
+    d = contract(d, planet_dir, PLANET_GAMMA);
+    {{/lorentz_contraction}}
+
+    float dotp = dot(d,ray);
+    float c_coeff = dot(d,d) - SQ(PLANET_RADIUS);
+    float ray2 = dot(ray, ray);
+    float discr = dotp*dotp - ray2*c_coeff;
+
+    if (discr < 0.0) return ret;
+    float isec_t = (-dotp - sqrt(discr)) / ray2;
+
+    float MIN_ISEC_DT = 0.0;
+    {{#lorentz_contraction}}
+    MIN_ISEC_DT = -dt;
+    {{/lorentz_contraction}}
+
+    if (isec_t < MIN_ISEC_DT || isec_t > dt) return ret;
+
+    vec3 surface_point = (d + isec_t*ray) / PLANET_RADIUS;
+
+    isec_t = isec_t/dt;
+
+    vec3 light_dir = planet_pos0;
+    float rot_phase = t;
+
+    {{#light_travel_time}}
+    light_dir += planet_vel*isec_t*dt;
+    rot_phase -= isec_t*dt;
+    {{/light_travel_time}}
+
+    rot_phase = rot_phase * PLANET_ROTATION_ANG_VEL*0.5/M_PI;
+    light_dir = light_dir / PLANET_DISTANCE;
+
+    {{#light_travel_time}}
+    light_dir = light_dir - planet_vel;
+    {{/light_travel_time}}
+
+    vec3 surface_normal = surface_point;
+    {{#lorentz_contraction}}
+    light_dir = contract(light_dir, planet_dir, PLANET_GAMMA);
+    {{/lorentz_contraction}}
+    light_dir = normalize(light_dir);
+
+    vec2 tex_coord = sphere_map(surface_point * PLANET_COORDS);
+    tex_coord.x = mod(tex_coord.x + rot_phase, 1.0);
+
+    float diffuse = max(0.0, dot(surface_normal, -light_dir));
+    float lightness = ((1.0-PLANET_AMBIENT)*diffuse + PLANET_AMBIENT) *
+        PLANET_LIGHTNESS;
+
+    float light_temperature = ACCRETION_TEMPERATURE;
+    {{#doppler_shift}}
+    float doppler_factor = SQ(PLANET_GAMMA) *
+        (1.0 + dot(planet_vel, light_dir)) *
+        (1.0 - dot(planet_vel, normalize(ray)));
+    light_temperature /= doppler_factor * ray_doppler_factor;
+    {{/doppler_shift}}
+
+    vec4 light_color = BLACK_BODY_COLOR(light_temperature);
+    ret = texture2D(planet_texture, tex_coord) * lightness * light_color;
+    if (isec_t < 0.0) isec_t = 0.5;
+    ret.w = isec_t;
+
+    return ret;
+}
+
+vec4 galaxy_color(vec2 tex_coord, float doppler_factor) {
+
+    vec4 color = texture2D(galaxy_texture, tex_coord);
+    {{^observerMotion}}
+    return color;
+    {{/observerMotion}}
+
+    {{#observerMotion}}
+    vec4 ret = vec4(0.0,0.0,0.0,0.0);
+    float red = max(0.0, color.r - color.g);
+
+    const float H_ALPHA_RATIO = 0.1;
+    const float TEMPERATURE_BIAS = 0.95;
+
+    color.r -= red*H_ALPHA_RATIO;
+
+    float i1 = max(color.r, max(color.g, color.b));
+    float ratio = (color.g+color.b) / color.r;
+
+    if (i1 > 0.0 && color.r > 0.0) {
+
+        float temperature = TEMPERATURE_LOOKUP(ratio) * TEMPERATURE_BIAS;
+        color = BLACK_BODY_COLOR(temperature);
+
+        float i0 = max(color.r, max(color.g, color.b));
+        if (i0 > 0.0) {
+            temperature /= doppler_factor;
+            ret = BLACK_BODY_COLOR(temperature) * max(i1/i0,0.0);
         }
-    };
-    var that = this;
-    this.needsUpdate = false;
+    }
 
-    this.hasMovingParts = function() {
-        return this.parameters.planet.enabled || this.parameters.observer.motion;
-    };
+    ret += SINGLE_WAVELENGTH_COLOR(656.28 * doppler_factor) * red / 0.214 * H_ALPHA_RATIO;
 
-    this.compile = function() {
-        return Mustache.render(mustacheTemplate, that.parameters);
-    };
+    return ret;
+    {{/observerMotion}}
 }
 
-function degToRad(a) { return Math.PI * a / 180.0; }
+void main() {
 
-(function(){
-    var textures = {};
+    {{#planetEnabled}}
+    // "constants" derived from uniforms
+    PLANET_RADIUS = planet_radius;
+    PLANET_DISTANCE = max(planet_distance,planet_radius+1.5);
+    PLANET_ORBITAL_ANG_VEL = -1.0 / sqrt(2.0*(PLANET_DISTANCE-1.0)) / PLANET_DISTANCE;
+    float MAX_PLANET_ROT = max((1.0 + PLANET_ORBITAL_ANG_VEL*PLANET_DISTANCE) / PLANET_RADIUS,0.0);
+    PLANET_ROTATION_ANG_VEL = -PLANET_ORBITAL_ANG_VEL + MAX_PLANET_ROT * 0.5;
+    PLANET_GAMMA = 1.0/sqrt(1.0-SQ(PLANET_ORBITAL_ANG_VEL*PLANET_DISTANCE));
+    {{/planetEnabled}}
 
-    function whenLoaded() {
-        init(textures);
-        $('#loader').hide();
-        $('.initially-hidden').removeClass('initially-hidden');
-        animate();
-    }
+    vec2 p = -1.0 + 2.0 * gl_FragCoord.xy / resolution.xy;
+    p.y *= resolution.y / resolution.x;
 
-    function checkLoaded() {
-        if (shader === null) return;
-        for (var key in textures) if (textures[key] === null) return;
-        whenLoaded();
-    }
+    vec3 pos = cam_pos;
+    vec3 ray = normalize(p.x*cam_x + p.y*cam_y + FOV_MULT*cam_z);
 
-    SHADER_LOADER.load(function(shaders) {
-        shader = new Shader(shaders.raytracer.fragment);
-        checkLoaded();
-    });
+    {{#aberration}}
+    ray = lorentz_velocity_transformation(ray, cam_vel);
+    {{/aberration}}
 
-    var texLoader = new THREE.TextureLoader();
-    function loadTexture(symbol, filename, interpolation) {
-        textures[symbol] = null;
-        texLoader.load(filename, function(tex) {
-            tex.magFilter = interpolation;
-            tex.minFilter = interpolation;
-            textures[symbol] = tex;
-            checkLoaded();
-        });
-    }
+    float ray_intensity = 1.0;
+    float ray_doppler_factor = 1.0;
 
-    loadTexture('galaxy', 'img/milkyway.jpg', THREE.NearestFilter);
-    loadTexture('spectra', 'img/spectra.png', THREE.LinearFilter);
-    loadTexture('moon', 'img/beach-ball.png', THREE.LinearFilter);
-    loadTexture('stars', 'img/stars.png', THREE.LinearFilter);
-    loadTexture('accretion_disk', 'img/accretion-disk.png', THREE.LinearFilter);
-})();
+    float gamma = 1.0/sqrt(1.0-dot(cam_vel,cam_vel));
+    ray_doppler_factor = gamma*(1.0 + dot(ray,-cam_vel));
+    {{#beaming}}
+    ray_intensity /= ray_doppler_factor*ray_doppler_factor*ray_doppler_factor;
+    {{/beaming}}
+    {{^doppler_shift}}
+    ray_doppler_factor = 1.0;
+    {{/doppler_shift}}
 
-var updateUniforms;
+    float step = 0.01;
+    vec4 color = vec4(0.0,0.0,0.0,1.0);
 
-function init(textures) {
+    // initial conditions
+    float u = 1.0 / length(pos), old_u;
+    float u0 = u;
 
-    container = document.createElement( 'div' );
-    document.body.appendChild( container );
+    // Pearl Star boundary: u_Pearl = 1 / r_Pearl  (r_Pearl > 1 => u_Pearl < 1)
+    float u_pearl = 1.0 / pearl_radius;
 
-    scene = new THREE.Scene();
+    vec3 normal_vec = normalize(pos);
+    vec3 tangent_vec = normalize(cross(cross(normal_vec, ray), normal_vec));
 
-    var geometry = new THREE.PlaneBufferGeometry( 2, 2 );
+    float du = -dot(ray,normal_vec) / dot(ray,tangent_vec) * u;
+    float du0 = du;
 
-    var uniforms = {
-        time: { type: "f", value: 0 },
-        resolution: { type: "v2", value: new THREE.Vector2() },
-        cam_pos: { type: "v3", value: new THREE.Vector3() },
-        cam_x: { type: "v3", value: new THREE.Vector3() },
-        cam_y: { type: "v3", value: new THREE.Vector3() },
-        cam_z: { type: "v3", value: new THREE.Vector3() },
-        cam_vel: { type: "v3", value: new THREE.Vector3() },
+    float phi = 0.0;
+    float t = time;
+    float dt = 1.0;
 
-        planet_distance: { type: "f" },
-        planet_radius: { type: "f" },
+    {{^light_travel_time}}
+    float planet_ang0 = t * PLANET_ORBITAL_ANG_VEL;
+    vec3 planet_pos0 = vec3(cos(planet_ang0), sin(planet_ang0), 0)*PLANET_DISTANCE;
+    {{/light_travel_time}}
 
-        // Pearl Star radius in units of Schwarzschild radius r_s (1.0 in sim)
-        pearl_radius: { type: "f", value: 1.0 },
+    vec3 old_pos;
+    bool bounced = false;  // track single Pearl Star bounce
 
-        star_texture: { type: "t", value: textures.stars },
-        accretion_disk_texture: { type: "t",  value: textures.accretion_disk },
-        galaxy_texture: { type: "t", value: textures.galaxy },
-        planet_texture: { type: "t", value: textures.moon },
-        spectrum_texture: { type: "t", value: textures.spectra }
-    };
+    for (int j=0; j < NSTEPS; j++) {
 
-    updateUniforms = function() {
-        uniforms.planet_distance.value = shader.parameters.planet.distance;
-        uniforms.planet_radius.value = shader.parameters.planet.radius;
+        step = MAX_REVOLUTIONS * 2.0*M_PI / float(NSTEPS);
 
-        // Update Pearl Star radius uniform
-        uniforms.pearl_radius.value =
-            shader.parameters.pearl_star.enabled
-                ? shader.parameters.pearl_star.radius_factor
-                : 1.0; // fall back to standard horizon if disabled
+        // adaptive step size, some ad hoc formulas
+        float max_rel_u_change = (1.0-log(u))*10.0 / float(NSTEPS);
+        if ((du > 0.0 || (du0 < 0.0 && u0/u < 5.0)) && abs(du) > abs(max_rel_u_change*u) / step)
+            step = max_rel_u_change*u/abs(du);
 
-        uniforms.resolution.value.x = renderer.domElement.width;
-        uniforms.resolution.value.y = renderer.domElement.height;
+        old_u = u;
 
-        uniforms.time.value = observer.time;
-        uniforms.cam_pos.value = observer.position;
+        {{#light_travel_time}}
+        {{#gravitational_time_dilation}}
+        dt = sqrt(du*du + u*u*(1.0-u))/(u*u*(1.0-u))*step;
+        {{/gravitational_time_dilation}}
+        {{/light_travel_time}}
 
-        var e = observer.orientation.elements;
+        // Leapfrog scheme in Schwarzschild: d^2u/dphi^2 = -u + 1.5 u^2
+        u += du*step;
+        float ddu = -u*(1.0 - 1.5*u*u);
+        du += ddu*step;
 
-        uniforms.cam_x.value.set(e[0], e[1], e[2]);
-        uniforms.cam_y.value.set(e[3], e[4], e[5]);
-        uniforms.cam_z.value.set(e[6], e[7], e[8]);
-
-        function setVec(target, value) {
-            uniforms[target].value.set(value.x, value.y, value.z);
+        // Pearl Star bounce: when ray reaches u > u_pearl, reflect radial motion once
+        if (!bounced && u > u_pearl) {
+            u = u_pearl;   // clamp to boundary
+            du = -du;      // reverse radial motion (elastic bounce)
+            bounced = true;
         }
 
-        setVec('cam_pos', observer.position);
-        setVec('cam_vel', observer.velocity);
-    };
+        if (u < 0.0) break;
 
-    var material = new THREE.ShaderMaterial( {
-        uniforms: uniforms,
-        vertexShader: $('#vertex-shader').text(),
-    });
+        phi += step;
 
-    scene.updateShader = function() {
-        material.fragmentShader = shader.compile();
-        material.needsUpdate = true;
-        shader.needsUpdate = true;
-    };
+        old_pos = pos;
+        pos = (cos(phi)*normal_vec + sin(phi)*tangent_vec)/u;
 
-    scene.updateShader();
+        ray = pos-old_pos;
+        float solid_isec_t = 2.0;
+        float ray_l = length(ray);
 
-    var mesh = new THREE.Mesh( geometry, material );
-    scene.add( mesh );
+        {{#light_travel_time}}
+        {{#gravitational_time_dilation}}
+        float mix = smooth_step(1.0/u, 8.0);
+        dt = mix*ray_l + (1.0-mix)*dt;
+        {{/gravitational_time_dilation}}
+        {{^gravitational_time_dilation}}
+        dt = ray_l;
+        {{/gravitational_time_dilation}}
+        {{/light_travel_time}}
 
-    renderer = new THREE.WebGLRenderer();
-    renderer.setPixelRatio( window.devicePixelRatio );
-    container.appendChild( renderer.domElement );
+        {{#planetEnabled}}
+        if (
+            (
+                old_pos.z * pos.z < 0.0 ||
+                min(abs(old_pos.z), abs(pos.z)) < PLANET_RADIUS
+            ) &&
+            max(u, old_u) > 1.0/(PLANET_DISTANCE+PLANET_RADIUS) &&
+            min(u, old_u) < 1.0/(PLANET_DISTANCE-PLANET_RADIUS)
+        ) {
 
-    stats = new Stats();
-    stats.domElement.style.position = 'absolute';
-    stats.domElement.style.top = '0px';
-    container.appendChild( stats.domElement );
-    $(stats.domElement).addClass('hidden-phone');
+            {{#light_travel_time}}
+            float planet_ang0 = t * PLANET_ORBITAL_ANG_VEL;
+            vec3 planet_pos0 = vec3(cos(planet_ang0), sin(planet_ang0), 0)*PLANET_DISTANCE;
+            {{/light_travel_time}}
 
-    // Orbit camera from three.js
-    camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, 1, 80000 );
-    initializeCamera(camera);
+            vec4 planet_isec = planet_intersection(old_pos, ray, t, dt,
+                    planet_pos0, ray_doppler_factor);
+            if (planet_isec.w > 0.0) {
+                solid_isec_t = planet_isec.w;
+                planet_isec.w = 1.0;
+                color += planet_isec;
+            }
+        }
+        {{/planetEnabled}}
 
-    cameraControls = new THREE.OrbitControls( camera, renderer.domElement );
-    cameraControls.target.set( 0, 0, 0 );
-    cameraControls.addEventListener( 'change', updateCamera );
-    updateCamera();
+        {{#accretion_disk}}
+        if (old_pos.z * pos.z < 0.0) {
+            // crossed plane z=0
 
-    onWindowResize();
+            float acc_isec_t = -old_pos.z / ray.z;
+            if (acc_isec_t < solid_isec_t) {
+                vec3 isec = old_pos + ray*acc_isec_t;
 
-    window.addEventListener( 'resize', onWindowResize, false );
+                float r = length(isec);
 
-    setupGUI();
-}
+                if (r > ACCRETION_MIN_R) {
+                    vec2 tex_coord = vec2(
+                            (r-ACCRETION_MIN_R)/ACCRETION_WIDTH,
+                            atan(isec.x, isec.y)/M_PI*0.5+0.5
+                    );
 
-function setupGUI() {
+                    float accretion_intensity = ACCRETION_BRIGHTNESS;
+                    float temperature = ACCRETION_TEMPERATURE;
 
-    var hint = $('#hint-text');
-    var p = shader.parameters;
+                    vec3 accretion_v = vec3(-isec.y, isec.x, 0.0) / sqrt(2.0*(r-1.0)) / (r*r);
+                    gamma = 1.0/sqrt(1.0-dot(accretion_v,accretion_v));
+                    float doppler_factor = gamma*(1.0+dot(ray/ray_l,accretion_v));
+                    {{#beaming}}
+                    accretion_intensity /= doppler_factor*doppler_factor*doppler_factor;
+                    {{/beaming}}
+                    {{#doppler_shift}}
+                    temperature /= ray_doppler_factor*doppler_factor;
+                    {{/doppler_shift}}
 
-    function updateShader() {
-        hint.hide();
-        scene.updateShader();
-    }
+                    color += texture2D(accretion_disk_texture,tex_coord)
+                        * accretion_intensity
+                        * BLACK_BODY_COLOR(temperature);
+                }
+            }
+        }
+        {{/accretion_disk}}
 
-    var gui = new dat.GUI();
+        {{#light_travel_time}}
+        t -= dt;
+        {{/light_travel_time}}
 
-    gui.add(p, 'quality', ['fast', 'medium', 'high']).onChange(function (value) {
-        $('.planet-controls').show();
-        switch(value) {
-        case 'fast':
-            p.n_steps = 40;
-            $('.planet-controls').hide();
+        // if we hit a solid (planet) along this geodesic, stop integrating
+        if (solid_isec_t <= 1.0) {
+            u = 2.0; // sentinel: "hit solid, no background"
             break;
-        case 'medium':
-            p.n_steps = 100;
-            break;
-        case 'high':
-            p.n_steps = 200;
-            break;
         }
 
-        updateShader();
-    });
-    gui.add(p, 'accretion_disk').onChange(updateShader);
+        // if we've gone sufficiently far out again, stop
+        if (u > 1.0) break;
+    }
 
-    var folder = gui.addFolder('Observer');
-    folder.add(p.observer, 'motion').onChange(function(motion) {
-        updateCamera();
-        updateShader();
-        if (motion) {
-            hint.text('Moving observer; drag to rotate camera');
-        } else {
-            hint.text('Stationary observer; drag to orbit around');
+    // If u < 1.0, ray was not absorbed by a solid: sample background
+    if (u < 1.0) {
+        ray = normalize(pos - old_pos);
+        vec2 tex_coord = sphere_map(ray * BG_COORDS);
+        float t_coord;
+
+        vec4 star_color = texture2D(star_texture, tex_coord);
+        if (star_color.r > 0.0) {
+            t_coord = (STAR_MIN_TEMPERATURE +
+                (STAR_MAX_TEMPERATURE-STAR_MIN_TEMPERATURE) * star_color.g)
+                 / ray_doppler_factor;
+
+            color += BLACK_BODY_COLOR(t_coord) * star_color.r * STAR_BRIGHTNESS;
         }
-        hint.fadeIn();
-    });
-    folder.add(p.observer, 'distance').min(1.5).max(30).onChange(updateCamera);
-    folder.open();
 
-    folder = gui.addFolder('Planet');
-    folder.add(p.planet, 'enabled').onChange(function(enabled) {
-        updateShader();
-        var controls = $('.indirect-planet-controls').show();
-        if (enabled) controls.show();
-        else controls.hide();
-    });
-    folder.add(p.planet, 'distance').min(1.5).onChange(updateUniforms);
-    folder.add(p.planet, 'radius').min(0.01).max(2.0).onChange(updateUniforms);
-    $(folder.domElement).addClass('planet-controls');
-    //folder.open();
-
-    // --- Pearl Star GUI controls ---
-    folder = gui.addFolder('Pearl Star');
-    folder.add(p.pearl_star, 'enabled')
-        .name('Enable Pearl Star')
-        .onChange(function () {
-            updateShader();
-            updateUniforms();
-        });
-    folder.add(p.pearl_star, 'radius_factor', 1.0, 1.5, 0.001)
-        .name('Radius / r_s')
-        .onChange(updateUniforms);
-    //folder.open();
-
-    function setGuiRowClass(guiEl, klass) {
-        $(guiEl.domElement).parent().parent().addClass(klass);
+        color += galaxy_color(tex_coord, ray_doppler_factor) * GALAXY_BRIGHTNESS;
     }
 
-    folder = gui.addFolder('Relativistic effects');
-    folder.add(p, 'aberration').onChange(updateShader);
-    folder.add(p, 'beaming').onChange(updateShader);
-    folder.add(p, 'doppler_shift').onChange(updateShader);
-    setGuiRowClass(
-        folder.add(p, 'gravitational_time_dilation').onChange(updateShader),
-        'planet-controls indirect-planet-controls');
-    setGuiRowClass(
-        folder.add(p, 'lorentz_contraction').onChange(updateShader),
-        'planet-controls indirect-planet-controls');
-
-    folder.open();
-
-    folder = gui.addFolder('Time');
-    folder.add(p, 'light_travel_time').onChange(updateShader);
-    folder.add(p, 'time_scale').min(0);
-    //folder.open();
-
-}
-
-function onWindowResize( event ) {
-    renderer.setSize( window.innerWidth, window.innerHeight );
-    updateUniforms();
-}
-
-function initializeCamera(camera) {
-
-    var pitchAngle = 3.0, yawAngle = 0.0;
-
-    // there are nicely named methods such as "lookAt" in the camera object
-    // but there do not do a thing to the projection matrix due to an internal
-    // representation of the camera coordinates using a quaternion (nice)
-    camera.matrixWorldInverse.makeRotationX(degToRad(-pitchAngle));
-    camera.matrixWorldInverse.multiply(new THREE.Matrix4().makeRotationY(degToRad(-yawAngle)));
-
-    var m = camera.matrixWorldInverse.elements;
-
-    camera.position.set(m[2], m[6], m[10]);
-}
-
-function updateCamera( event ) {
-
-    var zoom_dist = camera.position.length();
-    var m = camera.matrixWorldInverse.elements;
-    var camera_matrix;
-
-    if (shader.parameters.observer.motion) {
-        camera_matrix = new THREE.Matrix3();
-    }
-    else {
-        camera_matrix = observer.orientation;
-    }
-
-    camera_matrix.set(
-        // row-major, not the same as .elements (nice)
-        // y and z swapped for a nicer coordinate system
-        m[0], m[1], m[2],
-        m[8], m[9], m[10],
-        m[4], m[5], m[6]
-    );
-
-    if (shader.parameters.observer.motion) {
-
-        observer.orientation = observer.orbitalFrame().multiply(camera_matrix);
-
-    } else {
-
-        var p = new THREE.Vector3(
-            camera_matrix.elements[6],
-            camera_matrix.elements[7],
-            camera_matrix.elements[8]);
-
-        var dist = shader.parameters.observer.distance;
-        observer.position.set(-p.x*dist, -p.y*dist, -p.z*dist);
-        observer.velocity.set(0,0,0);
-    }
-}
-
-function frobeniusDistance(matrix1, matrix2) {
-    var sum = 0.0;
-    for (var i in matrix1.elements) {
-        var diff = matrix1.elements[i] - matrix2.elements[i];
-        sum += diff*diff;
-    }
-    return Math.sqrt(sum);
-}
-
-function animate() {
-    requestAnimationFrame( animate );
-
-    camera.updateMatrixWorld();
-    camera.matrixWorldInverse.getInverse( camera.matrixWorld );
-
-    if (shader.needsUpdate || shader.hasMovingParts() ||
-        frobeniusDistance(camera.matrixWorldInverse, lastCameraMat) > 1e-10) {
-
-        shader.needsUpdate = false;
-        render();
-        lastCameraMat = camera.matrixWorldInverse.clone();
-    }
-    stats.update();
-}
-
-var lastCameraMat = new THREE.Matrix4().identity();
-
-var getFrameDuration = (function() {
-    var lastTimestamp = new Date().getTime();
-    return function() {
-        var timestamp = new Date().getTime();
-        var diff = (timestamp - lastTimestamp) / 1000.0;
-        lastTimestamp = timestamp;
-        return diff;
-    };
-})();
-
-function render() {
-    observer.move(getFrameDuration());
-    if (shader.parameters.observer.motion) updateCamera();
-    updateUniforms();
-    renderer.render( scene, camera );
+    gl_FragColor = color*ray_intensity;
 }
