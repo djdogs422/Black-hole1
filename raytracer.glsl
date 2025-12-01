@@ -436,14 +436,14 @@ void main() {
         vec3 inc_dir = normalize(pos - old_pos);
         vec3 refl_dir = reflect(inc_dir, n);
 
-        // --- reflected environment (stars + galaxy) ---
-        vec2 tex_coord = sphere_map(refl_dir * BG_COORDS);
-        float t_coord;
-
         vec3 pearl_col = vec3(0.0);
 
+        // --- reflected environment (stars + galaxy) ---
+        vec2 env_coord = sphere_map(refl_dir * BG_COORDS);
+        float t_coord;
+
         // stars
-        vec4 star_color = texture2D(star_texture, tex_coord);
+        vec4 star_color = texture2D(star_texture, env_coord);
         if (star_color.r > 0.0) {
             t_coord = (STAR_MIN_TEMPERATURE +
                 (STAR_MAX_TEMPERATURE-STAR_MIN_TEMPERATURE) * star_color.g)
@@ -454,10 +454,10 @@ void main() {
         }
 
         // galaxy
-        pearl_col += galaxy_color(tex_coord, ray_doppler_factor).rgb
+        pearl_col += galaxy_color(env_coord, ray_doppler_factor).rgb
                      * GALAXY_BRIGHTNESS;
 
-        // --- approximate reflection of accretion disk ---
+        // --- strong, obvious reflection of accretion disk ---
         // Treat the reflected ray as starting at the Pearl surface and
         // intersecting the disk plane z = 0, just like the main path.
         vec3 disk_ray = refl_dir;
@@ -469,22 +469,27 @@ void main() {
                 vec3 disk_point = surface_pos + t_disk * disk_ray;
                 float r_disk = length(disk_point);
 
-                if (r_disk > ACCRETION_MIN_R) {
-                    vec2 acc_coord = vec2(
-                        (r_disk - ACCRETION_MIN_R) / ACCRETION_WIDTH,
-                        atan(disk_point.x, disk_point.y) / M_PI * 0.5 + 0.5
-                    );
+                // For reflection, be less strict than the main code:
+                // clamp radius mapping into [0,1] so we always get something
+                float r_param = (r_disk - ACCRETION_MIN_R) / ACCRETION_WIDTH;
+                r_param = clamp(r_param, 0.0, 1.0);
 
-                    vec3 acc_tex = texture2D(accretion_disk_texture, acc_coord).rgb;
-                    vec3 acc_bb  = BLACK_BODY_COLOR(ACCRETION_TEMPERATURE).rgb;
+                vec2 acc_coord = vec2(
+                    r_param,
+                    atan(disk_point.x, disk_point.y) / M_PI * 0.5 + 0.5
+                );
 
-                    float acc_intensity = ACCRETION_BRIGHTNESS;
-                    pearl_col += acc_tex * acc_bb * acc_intensity;
-                }
+                vec3 acc_tex = texture2D(accretion_disk_texture, acc_coord).rgb;
+                vec3 acc_bb  = BLACK_BODY_COLOR(ACCRETION_TEMPERATURE).rgb;
+
+                // Make the reflected disk quite bright so it stands out
+                float acc_intensity = ACCRETION_BRIGHTNESS * 3.0;
+
+                pearl_col += acc_tex * acc_bb * acc_intensity;
             }
         }
 
-        // make Pearl Star surface a bit brighter so it stands out
+        // make Pearl Star surface a bit brighter overall
         float PEARL_BRIGHTNESS = 1.2;
         pearl_col *= PEARL_BRIGHTNESS;
 
