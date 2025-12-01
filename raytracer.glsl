@@ -409,7 +409,7 @@ void main() {
 
     // Pearl Star boundary is at u = u_pearl (r = pearl_radius)
     // u < u_pearl: ray escaped to infinity -> background sky
-    // u >= u_pearl: ray hit Pearl Star -> reflect environment (galaxy + stars + disk)
+    // u >= u_pearl: ray hit Pearl Star -> reflect environment (galaxy + stars + stylised disk)
     if (u < u_pearl) {
         // escaped ray: sample background along outgoing direction
         ray = normalize(pos - old_pos);
@@ -457,37 +457,29 @@ void main() {
         pearl_col += galaxy_color(env_coord, ray_doppler_factor).rgb
                      * GALAXY_BRIGHTNESS;
 
-        // --- strong, obvious reflection of accretion disk ---
-        // Treat the reflected ray as starting at the Pearl surface and
-        // intersecting the disk plane z = 0, just like the main path.
-        vec3 disk_ray = refl_dir;
-        float denom = disk_ray.z;
+        // --- stylised "reflection" of accretion disk on Pearl surface ---
+        // Use the Pearl surface normal to paint a bright band around the equator
+        // using the accretion disk texture.
+        float z = n.z;  // +1 at north pole, 0 at equator, -1 at south pole
 
-        if (abs(denom) > 1e-4) {        // not parallel to disk plane
-            float t_disk = -surface_pos.z / denom;  // solve z=0
-            if (t_disk > 0.0) {         // only in front of the surface
-                vec3 disk_point = surface_pos + t_disk * disk_ray;
-                float r_disk = length(disk_point);
+        // Map |z| -> radial coordinate in the disk texture (0 at poles, 1 at equator)
+        float disk_radial = 1.0 - clamp(abs(z), 0.0, 1.0);
 
-                // For reflection, be less strict than the main code:
-                // clamp radius mapping into [0,1] so we always get something
-                float r_param = (r_disk - ACCRETION_MIN_R) / ACCRETION_WIDTH;
-                r_param = clamp(r_param, 0.0, 1.0);
+        // Angular coordinate around the equator
+        float disk_angle = atan(n.x, n.y) / M_PI * 0.5 + 0.5;
 
-                vec2 acc_coord = vec2(
-                    r_param,
-                    atan(disk_point.x, disk_point.y) / M_PI * 0.5 + 0.5
-                );
+        vec2 disk_uv = vec2(disk_radial, disk_angle);
 
-                vec3 acc_tex = texture2D(accretion_disk_texture, acc_coord).rgb;
-                vec3 acc_bb  = BLACK_BODY_COLOR(ACCRETION_TEMPERATURE).rgb;
+        vec3 disk_tex = texture2D(accretion_disk_texture, disk_uv).rgb;
+        vec3 disk_bb  = BLACK_BODY_COLOR(ACCRETION_TEMPERATURE).rgb;
 
-                // Make the reflected disk quite bright so it stands out
-                float acc_intensity = ACCRETION_BRIGHTNESS * 3.0;
+        // Emphasise the band near the equator
+        float band = smoothstep(0.6, 1.0, disk_radial);
 
-                pearl_col += acc_tex * acc_bb * acc_intensity;
-            }
-        }
+        // Make disk component bright so it's clearly visible
+        float DISK_REFLECT_INTENSITY = ACCRETION_BRIGHTNESS * 2.5;
+
+        pearl_col += disk_tex * disk_bb * DISK_REFLECT_INTENSITY * band;
 
         // make Pearl Star surface a bit brighter overall
         float PEARL_BRIGHTNESS = 1.2;
