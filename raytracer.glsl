@@ -32,7 +32,7 @@ uniform vec3 cam_vel;
 
 uniform float planet_distance, planet_radius;
 
-// NEW: Pearl Star radius in units of Schwarzschild radius r_s (1.0 in sim)
+// Pearl Star radius (in units of Schwarzschild radius r_s = 1.0)
 uniform float pearl_radius;
 
 uniform sampler2D galaxy_texture, star_texture,
@@ -403,14 +403,13 @@ void main() {
 
         if (solid_isec_t <= 1.0) u = 2.0; // break on solid intersection
 
-        // ORIGINAL: if (u > 1.0) break;
-        // PEARL STAR: stop integrating once we reach inside the Pearl radius (u > u_pearl)
+        // Stop integrating once we reach inside the Pearl Star radius
         if (u > u_pearl) break;
     }
 
     // Pearl Star boundary is at u = u_pearl (r = pearl_radius)
     // u < u_pearl: ray escaped to infinity -> background sky
-    // u >= u_pearl: ray hit Pearl Star -> reflect environment
+    // u >= u_pearl: ray hit Pearl Star -> reflect environment (galaxy + stars + disk)
     if (u < u_pearl) {
         // escaped ray: sample background along outgoing direction
         ray = normalize(pos - old_pos);
@@ -429,27 +428,67 @@ void main() {
         color += galaxy_color(tex_coord, ray_doppler_factor) * GALAXY_BRIGHTNESS;
     } else {
         // hit Pearl Star reflective surface
-        vec3 surface_pos = normalize(pos) / u_pearl; // clamp to Pearl radius
-        vec3 n = normalize(surface_pos);             // outward normal
+        // clamp to Pearl radius and get outward normal
+        vec3 surface_pos = normalize(pos) / u_pearl;
+        vec3 n = normalize(surface_pos);
 
         // incoming direction is direction of ray towards Pearl Star
         vec3 inc_dir = normalize(pos - old_pos);
         vec3 refl_dir = reflect(inc_dir, n);
 
+        // --- reflected environment (stars + galaxy) ---
         vec2 tex_coord = sphere_map(refl_dir * BG_COORDS);
         float t_coord;
 
+        vec3 pearl_col = vec3(0.0);
+
+        // stars
         vec4 star_color = texture2D(star_texture, tex_coord);
         if (star_color.r > 0.0) {
             t_coord = (STAR_MIN_TEMPERATURE +
                 (STAR_MAX_TEMPERATURE-STAR_MIN_TEMPERATURE) * star_color.g)
                  / ray_doppler_factor;
 
-            color += BLACK_BODY_COLOR(t_coord) * star_color.r * STAR_BRIGHTNESS;
+            pearl_col += BLACK_BODY_COLOR(t_coord).rgb
+                         * star_color.r * STAR_BRIGHTNESS;
         }
 
-        // reflected galaxy light
-        color += galaxy_color(tex_coord, ray_doppler_factor) * GALAXY_BRIGHTNESS;
+        // galaxy
+        pearl_col += galaxy_color(tex_coord, ray_doppler_factor).rgb
+                     * GALAXY_BRIGHTNESS;
+
+        // --- approximate reflection of accretion disk ---
+        // Treat the reflected ray as starting at the Pearl surface and
+        // intersecting the disk plane z = 0, just like the main path.
+        vec3 disk_ray = refl_dir;
+        float denom = disk_ray.z;
+
+        if (abs(denom) > 1e-4) {        // not parallel to disk plane
+            float t_disk = -surface_pos.z / denom;  // solve z=0
+            if (t_disk > 0.0) {         // only in front of the surface
+                vec3 disk_point = surface_pos + t_disk * disk_ray;
+                float r_disk = length(disk_point);
+
+                if (r_disk > ACCRETION_MIN_R) {
+                    vec2 acc_coord = vec2(
+                        (r_disk - ACCRETION_MIN_R) / ACCRETION_WIDTH,
+                        atan(disk_point.x, disk_point.y) / M_PI * 0.5 + 0.5
+                    );
+
+                    vec3 acc_tex = texture2D(accretion_disk_texture, acc_coord).rgb;
+                    vec3 acc_bb  = BLACK_BODY_COLOR(ACCRETION_TEMPERATURE).rgb;
+
+                    float acc_intensity = ACCRETION_BRIGHTNESS;
+                    pearl_col += acc_tex * acc_bb * acc_intensity;
+                }
+            }
+        }
+
+        // make Pearl Star surface a bit brighter so it stands out
+        float PEARL_BRIGHTNESS = 1.2;
+        pearl_col *= PEARL_BRIGHTNESS;
+
+        color += vec4(pearl_col, 1.0);
     }
 
     gl_FragColor = color*ray_intensity;
