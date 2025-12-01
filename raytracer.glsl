@@ -32,6 +32,9 @@ uniform vec3 cam_vel;
 
 uniform float planet_distance, planet_radius;
 
+// NEW: Pearl Star radius in units of Schwarzschild radius r_s (1.0 in sim)
+uniform float pearl_radius;
+
 uniform sampler2D galaxy_texture, star_texture,
     accretion_disk_texture, planet_texture, spectrum_texture;
 
@@ -269,6 +272,9 @@ void main() {
     float u = 1.0 / length(pos), old_u;
     float u0 = u;
 
+    // Pearl Star boundary: u_Pearl = 1 / r_Pearl
+    float u_pearl = 1.0 / pearl_radius;
+
     vec3 normal_vec = normalize(pos);
     vec3 tangent_vec = normalize(cross(cross(normal_vec, ray), normal_vec));
 
@@ -371,7 +377,6 @@ void main() {
                     );
 
                     float accretion_intensity = ACCRETION_BRIGHTNESS;
-                    //accretion_intensity *= 1.0 / abs(ray.z/ray_l);
                     float temperature = ACCRETION_TEMPERATURE;
 
                     vec3 accretion_v = vec3(-isec.y, isec.x, 0.0) / sqrt(2.0*(r-1.0)) / (r*r);
@@ -396,12 +401,18 @@ void main() {
         t -= dt;
         {{/light_travel_time}}
 
-        if (solid_isec_t <= 1.0) u = 2.0; // break
-        if (u > 1.0) break;
+        if (solid_isec_t <= 1.0) u = 2.0; // break on solid intersection
+
+        // ORIGINAL: if (u > 1.0) break;
+        // PEARL STAR: stop integrating once we reach inside the Pearl radius (u > u_pearl)
+        if (u > u_pearl) break;
     }
 
-    // the event horizon is at u = 1
-    if (u < 1.0) {
+    // Pearl Star boundary is at u = u_pearl (r = pearl_radius)
+    // u < u_pearl: ray escaped to infinity -> background sky
+    // u >= u_pearl: ray hit Pearl Star -> reflect environment
+    if (u < u_pearl) {
+        // escaped ray: sample background along outgoing direction
         ray = normalize(pos - old_pos);
         vec2 tex_coord = sphere_map(ray * BG_COORDS);
         float t_coord;
@@ -415,6 +426,29 @@ void main() {
             color += BLACK_BODY_COLOR(t_coord) * star_color.r * STAR_BRIGHTNESS;
         }
 
+        color += galaxy_color(tex_coord, ray_doppler_factor) * GALAXY_BRIGHTNESS;
+    } else {
+        // hit Pearl Star reflective surface
+        vec3 surface_pos = normalize(pos) / u_pearl; // clamp to Pearl radius
+        vec3 n = normalize(surface_pos);             // outward normal
+
+        // incoming direction is direction of ray towards Pearl Star
+        vec3 inc_dir = normalize(pos - old_pos);
+        vec3 refl_dir = reflect(inc_dir, n);
+
+        vec2 tex_coord = sphere_map(refl_dir * BG_COORDS);
+        float t_coord;
+
+        vec4 star_color = texture2D(star_texture, tex_coord);
+        if (star_color.r > 0.0) {
+            t_coord = (STAR_MIN_TEMPERATURE +
+                (STAR_MAX_TEMPERATURE-STAR_MIN_TEMPERATURE) * star_color.g)
+                 / ray_doppler_factor;
+
+            color += BLACK_BODY_COLOR(t_coord) * star_color.r * STAR_BRIGHTNESS;
+        }
+
+        // reflected galaxy light
         color += galaxy_color(tex_coord, ray_doppler_factor) * GALAXY_BRIGHTNESS;
     }
 
