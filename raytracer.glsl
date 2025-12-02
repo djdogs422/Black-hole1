@@ -315,10 +315,10 @@ void main() {
         float ddu = -u*(1.0 - 1.5*u*u);
         du += ddu*step;
 
-        // Pearl Star bounce: when ray reaches u > u_pearl, reflect radial motion
+        // Pearl Star bounce: when ray reaches u > u_pearl, reflect radial motion once
         if (!bounced && u > u_pearl) {
             u = u_pearl;   // clamp to boundary
-            du = -du;      // reverse radial motion (single elastic bounce)
+            du = -du;      // reverse radial motion (elastic bounce)
             bounced = true;
         }
 
@@ -409,8 +409,13 @@ void main() {
         t -= dt;
         {{/light_travel_time}}
 
-        // if we hit a solid (planet/disk) along this geodesic, stop integrating
-        if (solid_isec_t <= 1.0) u = 2.0; // sentinel value: "hit solid, no background"
+        // if we hit a solid (planet) along this geodesic, stop integrating
+        if (solid_isec_t <= 1.0) {
+            u = 2.0; // sentinel: "hit solid, no background"
+            break;
+        }
+
+        // if we've gone sufficiently far out again, stop
         if (u > 1.0) break;
     }
 
