@@ -14,7 +14,6 @@ function Observer() {
 
 Observer.prototype.orbitalFrame = function () {
 
-    //var orbital_y = observer.velocity.clone().normalize();
     var orbital_y = (new THREE.Vector3())
         .subVectors(observer.velocity.clone().normalize().multiplyScalar(4.0),
             observer.position).normalize();
@@ -98,7 +97,6 @@ function Shader(mustacheTemplate) {
         // Pearl Star parameters
         pearl_star: {
             enabled: true,
-            // r_Pearl = (1 + sqrt(2)) * GM/c^2 = ((1 + sqrt(2)) / 2) * r_s (here r_s = 1)
             radius_factor: (1.0 + Math.sqrt(2.0)) / 2.0
         },
 
@@ -200,7 +198,6 @@ function init(textures) {
         uniforms.planet_distance.value = shader.parameters.planet.distance;
         uniforms.planet_radius.value = shader.parameters.planet.radius;
 
-        // Update Pearl Star radius uniform
         uniforms.pearl_radius.value =
             shader.parameters.pearl_star.enabled
                 ? shader.parameters.pearl_star.radius_factor
@@ -252,7 +249,6 @@ function init(textures) {
     container.appendChild(stats.domElement);
     $(stats.domElement).addClass("hidden-phone");
 
-    // Orbit camera from three.js
     camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 80000);
     initializeCamera(camera);
 
@@ -323,7 +319,6 @@ function setupGUI() {
     folder.add(p.planet, "radius").min(0.01).max(2.0).onChange(updateUniforms);
     $(folder.domElement).addClass("planet-controls");
 
-    // Pearl Star GUI controls
     folder = gui.addFolder("Pearl Star");
     folder.add(p.pearl_star, "enabled")
         .name("Enable Pearl Star")
@@ -387,8 +382,6 @@ function updateCamera(event) {
     }
 
     camera_matrix.set(
-        // row-major, not the same as .elements
-        // y and z swapped for a nicer coordinate system
         m[0], m[1], m[2],
         m[8], m[9], m[10],
         m[4], m[5], m[6]
