@@ -303,6 +303,7 @@ void main() {
             step = max_rel_u_change*u/abs(du);
 
         old_u = u;
+        float phi_before = phi;
 
         {{#light_travel_time}}
         {{#gravitational_time_dilation}}
@@ -314,17 +315,22 @@ void main() {
         u += du*step;
         float ddu = -u*(1.0 - 1.5*u*u);
         du += ddu*step;
+        phi += step;
 
-        // Pearl Star bounce: when ray reaches u > u_pearl, reflect radial motion once
-        if (!bounced && u > u_pearl) {
-            u = u_pearl;   // clamp to boundary
-            du = -du;      // reverse radial motion (elastic bounce)
+        // Pearl Star bounce: when we first cross u_pearl, snap turning point to the surface
+        if (!bounced && u > u_pearl && old_u <= u_pearl) {
+            float alpha = (u_pearl - old_u) / (u - old_u);
+            alpha = clamp(alpha, 0.0, 1.0);
+
+            u = u_pearl;
+            phi = phi_before + alpha * step;
+
+            // reverse radial motion (elastic specular bounce in central potential)
+            du = -abs(du);
             bounced = true;
         }
 
         if (u < 0.0) break;
-
-        phi += step;
 
         old_pos = pos;
         pos = (cos(phi)*normal_vec + sin(phi)*tangent_vec)/u;
